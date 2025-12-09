@@ -3,6 +3,7 @@
 import logging
 from dataclasses import dataclass, field
 from typing import Any
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import cvxpy as cp
 import numpy as np
@@ -307,49 +308,56 @@ class DCCP:
         """Solve a problem using the Disciplined Convex-Concave Procedure."""
         return self._solve() * (-1 if self.is_maximization else 1)
 
-    def solve_multi_init(self, num_inits: int) -> float:
-        """Solve with multiple random initializations and return the best result."""
+    def _solve_vars(self, varlist: list[cp.Variable]) -> tuple[float | None,
+                                                               list | None]:
+        self._prev_var_values = {}
+        self._store_previous_values()
+        obj = self._solve()
+        if self.prob_in.status == cp.OPTIMAL:
+            return obj, [v.value for v in varlist]
+        else:
+            return None, None
+    
+    def solve_multi_init(
+            self, num_inits: int, max_workers: int | None = None) -> float:
+        """Solve with multiple random initializations
+        and return the best result.
+        """
         if num_inits <= 1:
             return self()
 
         best_cost = np.inf
-        best_var_values = {}
+        best_var_values = None
         best_status = cp.INFEASIBLE
 
-        for _ in range(num_inits):
-            # store original variable values
-            orig_values = {}
-            for var in self.prob_in.variables():
-                orig_values[var] = var.value.copy() if var.value is not None else None
+        self.iter.k = 0
+        self.iter.cost = np.inf
 
-            # reset and solve with new random initialization
-            initialize(self.prob_in, random=True)
-            self.iter.k = 0
-            self.iter.cost = np.inf
-            self._prev_var_values = {}
-            self._store_previous_values()
+        varlist = self.prob_in.variables()
 
-            try:
-                cost = self._solve()
-                if self.prob_in.status == cp.OPTIMAL and cost < best_cost:
-                    best_cost = cost
-                    best_status = self.prob_in.status
-                    best_var_values = {
-                        var: var.value.copy() if var.value is not None else None
-                        for var in self.prob_in.variables()
-                    }
-            except (NonDCCPError, RuntimeError):
-                continue
-
-            # restore original values for next iteration
-            for var in self.prob_in.variables():
-                var.value = orig_values[var]
+        orig_values = [None if v.value is None else v.value.copy()
+                       for v in varlist]
+        
+        with ProcessPoolExecutor(max_workers) as exc:
+            futs = []
+            for _ in range(num_inits):
+                # reset and solve with new random initialization
+                initialize(self.prob_in, random=True)
+                futs.append(exc.submit(self._solve_vars, varlist))
+            for f in as_completed(futs):
+                try:
+                    cost, vals = f.result()
+                    if cost is not None and cost < best_cost:
+                        best_cost = cost
+                        best_status = cp.OPTIMAL
+                        best_var_values = vals
+                except (NonDCCPError, RuntimeError):
+                    continue
 
         # set the best solution
         self.prob_in._status = best_status  # noqa: SLF001
-        for var in self.prob_in.variables():
-            if var in best_var_values:
-                var.value = best_var_values[var]
+        for var, val in zip(varlist, best_var_values or orig_values):
+            var.value = val
 
         return best_cost * (-1 if self.is_maximization else 1)
 
