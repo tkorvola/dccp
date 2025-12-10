@@ -319,7 +319,8 @@ class DCCP:
             return None, None
     
     def solve_multi_init(
-            self, num_inits: int, max_workers: int | None = None) -> float:
+            self, num_inits: int, max_workers: int | None = None,
+            mp_context=None) -> float:
         """Solve with multiple random initializations
         and return the best result.
         """
@@ -338,7 +339,7 @@ class DCCP:
         orig_values = [None if v.value is None else v.value.copy()
                        for v in varlist]
         
-        with ProcessPoolExecutor(max_workers) as exc:
+        with ProcessPoolExecutor(max_workers, mp_context) as exc:
             futs = []
             for _ in range(num_inits):
                 # reset and solve with new random initialization
@@ -374,6 +375,8 @@ def dccp(  # noqa: PLR0913
     ep: float = 1e-5,
     seed: int | None = None,
     verify_dccp: bool = True,
+    max_workers: int | None = None,
+    mp_context=None,
     **kwargs: Any,
 ) -> float:
     """Run the DCCP algorithm on the given problem.
@@ -403,6 +406,11 @@ def dccp(  # noqa: PLR0913
         Random seed for reproducible results.
     verify_dccp : bool, default=True
         Whether to verify DCCP compliance before solving.
+    max_workers : int, optional
+        Number of parallel worker processes if k_ccp > 1.
+        Defaults to the number of available logical CPUs.
+    mp_context : optional
+        Multiprocessing context for creating the worker processes.
     **kwargs
         Additional keyword arguments passed to the underlying solver.
 
@@ -447,5 +455,5 @@ def dccp(  # noqa: PLR0913
         **kwargs,
     )
     if k_ccp > 1:
-        return dccp_solver.solve_multi_init(k_ccp)
+        return dccp_solver.solve_multi_init(k_ccp, max_workers, mp_context)
     return dccp_solver()
