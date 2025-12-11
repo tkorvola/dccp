@@ -1,9 +1,9 @@
 """DCCP solver implementation for Disciplined Convex-Concave Programming."""
 
 import logging
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import cvxpy as cp
 import numpy as np
@@ -317,12 +317,13 @@ class DCCP:
             return obj, [v.value for v in varlist]
         else:
             return None, None
-    
+
     def solve_multi_init(
             self, num_inits: int, max_workers: int | None = None,
             mp_context=None) -> float:
-        """Solve with multiple random initializations
-        and return the best result.
+        """Solve with multiple random initializations.
+
+        Return the best result.
         """
         if num_inits <= 1:
             return self()
@@ -338,7 +339,7 @@ class DCCP:
 
         orig_values = [None if v.value is None else v.value.copy()
                        for v in varlist]
-        
+
         with ProcessPoolExecutor(max_workers, mp_context) as exc:
             futs = []
             for _ in range(num_inits):
@@ -357,7 +358,8 @@ class DCCP:
 
         # set the best solution
         self.prob_in._status = best_status  # noqa: SLF001
-        for var, val in zip(varlist, best_var_values or orig_values):
+        for var, val in zip(varlist, best_var_values or orig_values,
+                            strict=True):
             var.value = val
 
         return best_cost * (-1 if self.is_maximization else 1)
