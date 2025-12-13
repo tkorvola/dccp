@@ -1,9 +1,14 @@
 """DCCP solver implementation for Disciplined Convex-Concave Programming."""
 
+from __future__ import annotations
+
 import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from multiprocessing.context import BaseContext
 
 import cvxpy as cp
 import numpy as np
@@ -308,61 +313,138 @@ class DCCP:
         """Solve a problem using the Disciplined Convex-Concave Procedure."""
         return self._solve() * (-1 if self.is_maximization else 1)
 
-    def _solve_vars(self, varlist: list[cp.Variable]) -> tuple[float | None,
-                                                               list | None]:
+    def _solve_one_init(self) -> tuple[float | None, dict[int, Any] | None]:
+        """Solve with current initialization and return cost and variable values.
+
+        Returns
+        -------
+        tuple
+            (cost, variable_values_by_id) if optimal, (None, None) otherwise.
+            Variable values are keyed by variable id for pickling compatibility.
+
+        """
         self._prev_var_values = {}
         self._store_previous_values()
-        obj = self._solve()
+        self.iter.k = 0
+        self.iter.cost = np.inf
+        cost = self._solve()
         if self.prob_in.status == cp.OPTIMAL:
-            return obj, [v.value for v in varlist]
-        else:
-            return None, None
+            var_values = {
+                var.id: var.value.copy() if var.value is not None else None
+                for var in self.prob_in.variables()
+            }
+            return cost, var_values
+        return None, None
 
     def solve_multi_init(
-            self, num_inits: int, max_workers: int | None = None,
-            mp_context=None) -> float:
-        """Solve with multiple random initializations.
+        self,
+        num_inits: int,
+        *,
+        parallel: bool = True,
+        max_workers: int | None = None,
+        mp_context: BaseContext | None = None,
+    ) -> float:
+        """Solve with multiple random initializations and return the best result.
 
-        Return the best result.
+        Parameters
+        ----------
+        num_inits : int
+            Number of random initializations to try.
+        parallel : bool, default=True
+            If True, run initializations in parallel using multiprocessing.
+        max_workers : int, optional
+            Number of parallel worker processes. Only used if parallel=True.
+            Defaults to the number of available CPUs.
+        mp_context : BaseContext, optional
+            Multiprocessing context for creating worker processes.
+            Only used if parallel=True.
+
+        Returns
+        -------
+        float
+            The best objective value found across all initializations.
+
         """
         if num_inits <= 1:
             return self()
 
         best_cost = np.inf
-        best_var_values = None
+        best_var_values: dict[int, Any] | None = None
         best_status = cp.INFEASIBLE
 
-        self.iter.k = 0
-        self.iter.cost = np.inf
+        orig_values = {
+            var.id: var.value.copy() if var.value is not None else None
+            for var in self.prob_in.variables()
+        }
 
-        varlist = self.prob_in.variables()
+        if parallel:
+            best_cost, best_var_values, best_status = self._solve_multi_parallel(
+                num_inits, max_workers, mp_context
+            )
+        else:
+            best_cost, best_var_values, best_status = self._solve_multi_sequential(
+                num_inits
+            )
 
-        orig_values = [None if v.value is None else v.value.copy()
-                       for v in varlist]
+        # Set the best solution
+        self.prob_in._status = best_status  # noqa: SLF001
+        for var in self.prob_in.variables():
+            if best_var_values and var.id in best_var_values:
+                var.value = best_var_values[var.id]
+            else:
+                var.value = orig_values[var.id]
 
-        with ProcessPoolExecutor(max_workers, mp_context) as exc:
-            futs = []
+        return best_cost * (-1 if self.is_maximization else 1)
+
+    def _solve_multi_sequential(
+        self, num_inits: int
+    ) -> tuple[float, dict[int, Any] | None, str]:
+        """Run multiple initializations sequentially."""
+        best_cost = np.inf
+        best_var_values: dict[int, Any] | None = None
+        best_status = cp.INFEASIBLE
+
+        for _ in range(num_inits):
+            initialize(self.prob_in, random=True)
+            try:
+                cost, var_values = self._solve_one_init()
+                if cost is not None and cost < best_cost:
+                    best_cost = cost
+                    best_status = cp.OPTIMAL
+                    best_var_values = var_values
+            except (NonDCCPError, RuntimeError):
+                continue
+
+        return best_cost, best_var_values, best_status
+
+    def _solve_multi_parallel(
+        self,
+        num_inits: int,
+        max_workers: int | None,
+        mp_context: BaseContext | None,
+    ) -> tuple[float, dict[int, Any] | None, str]:
+        """Run multiple initializations in parallel using multiprocessing."""
+        best_cost = np.inf
+        best_var_values: dict[int, Any] | None = None
+        best_status = cp.INFEASIBLE
+
+        with ProcessPoolExecutor(max_workers, mp_context) as executor:
+            futures = []
             for _ in range(num_inits):
-                # reset and solve with new random initialization
                 initialize(self.prob_in, random=True)
-                futs.append(exc.submit(self._solve_vars, varlist))
-            for f in as_completed(futs):
+                futures.append(executor.submit(self._solve_one_init))
+
+            for future in as_completed(futures):
                 try:
-                    cost, vals = f.result()
+                    cost, var_values = future.result()
                     if cost is not None and cost < best_cost:
                         best_cost = cost
                         best_status = cp.OPTIMAL
-                        best_var_values = vals
+                        best_var_values = var_values
                 except (NonDCCPError, RuntimeError):
                     continue
 
-        # set the best solution
-        self.prob_in._status = best_status  # noqa: SLF001
-        for var, val in zip(varlist, best_var_values or orig_values,
-                            strict=True):
-            var.value = val
-
-        return best_cost * (-1 if self.is_maximization else 1)
+        return best_cost, best_var_values, best_status
 
 
 def dccp(  # noqa: PLR0913
@@ -377,8 +459,9 @@ def dccp(  # noqa: PLR0913
     ep: float = 1e-5,
     seed: int | None = None,
     verify_dccp: bool = True,
+    parallel: bool = True,
     max_workers: int | None = None,
-    mp_context=None,
+    mp_context: BaseContext | None = None,
     **kwargs: Any,
 ) -> float:
     """Run the DCCP algorithm on the given problem.
@@ -408,11 +491,14 @@ def dccp(  # noqa: PLR0913
         Random seed for reproducible results.
     verify_dccp : bool, default=True
         Whether to verify DCCP compliance before solving.
+    parallel : bool, default=True
+        If True and k_ccp > 1, run restarts in parallel using multiprocessing.
     max_workers : int, optional
-        Number of parallel worker processes if k_ccp > 1.
-        Defaults to the number of available logical CPUs.
-    mp_context : optional
-        Multiprocessing context for creating the worker processes.
+        Number of parallel worker processes if k_ccp > 1 and parallel=True.
+        Defaults to the number of available CPUs.
+    mp_context : BaseContext, optional
+        Multiprocessing context for creating worker processes.
+        Only used if parallel=True.
     **kwargs
         Additional keyword arguments passed to the underlying solver.
 
@@ -457,5 +543,7 @@ def dccp(  # noqa: PLR0913
         **kwargs,
     )
     if k_ccp > 1:
-        return dccp_solver.solve_multi_init(k_ccp, max_workers, mp_context)
+        return dccp_solver.solve_multi_init(
+            k_ccp, parallel=parallel, max_workers=max_workers, mp_context=mp_context
+        )
     return dccp_solver()

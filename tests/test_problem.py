@@ -230,3 +230,127 @@ class TestDccpFunction:
 
         assert result is not None
         assert prob.status == cp.OPTIMAL
+
+    def test_dccp_function_multi_init_sequential(self) -> None:
+        """Test dccp function with multiple initializations in sequential mode."""
+        x = cp.Variable(2)
+        prob = cp.Problem(cp.Maximize(cp.norm(x)), [x >= 0, x <= 1])
+
+        result = dccp(prob, k_ccp=3, parallel=False, verify_dccp=False, seed=42)
+
+        assert result is not None
+        assert prob.status == cp.OPTIMAL
+
+    def test_dccp_function_multi_init_parallel(self) -> None:
+        """Test dccp function with multiple initializations in parallel mode."""
+        x = cp.Variable(2)
+        prob = cp.Problem(cp.Maximize(cp.norm(x)), [x >= 0, x <= 1])
+
+        result = dccp(
+            prob, k_ccp=3, parallel=True, max_workers=2, verify_dccp=False, seed=42
+        )
+
+        assert result is not None
+        assert prob.status == cp.OPTIMAL
+
+    def test_dccp_sequential_vs_parallel_consistency(self) -> None:
+        """Test that sequential and parallel modes produce similar results."""
+        x = cp.Variable(2)
+        prob_seq = cp.Problem(cp.Maximize(cp.norm(x)), [x >= 0, x <= 1])
+        prob_par = cp.Problem(cp.Maximize(cp.norm(x)), [x >= 0, x <= 1])
+
+        result_seq = dccp(
+            prob_seq, k_ccp=2, parallel=False, verify_dccp=False, seed=123
+        )
+        result_par = dccp(
+            prob_par, k_ccp=2, parallel=True, verify_dccp=False, seed=123
+        )
+
+        # Both should find optimal solutions (values may differ due to randomness)
+        assert result_seq is not None
+        assert result_par is not None
+        assert prob_seq.status == cp.OPTIMAL
+        assert prob_par.status == cp.OPTIMAL
+
+
+class TestMaximization:
+    """Test that maximization problems are handled correctly."""
+
+    def test_maximization_sequential_returns_correct_result(self) -> None:
+        """Test sequential maximization returns correct positive value."""
+        x = cp.Variable(2)
+        prob = cp.Problem(cp.Maximize(cp.norm(x)), [x >= 0, x <= 1])
+
+        result = dccp(prob, k_ccp=3, parallel=False, seed=42)
+
+        # For Maximize(norm(x)) with x in [0,1]^2, optimal is x=[1,1], norm=sqrt(2)
+        expected = np.sqrt(2)
+        assert result > 0, "Maximization result should be positive"
+        assert np.isclose(result, expected, atol=0.1), f"Expected ~1.414, got {result}"
+
+    def test_maximization_parallel_returns_correct_result(self) -> None:
+        """Test parallel maximization returns correct positive value."""
+        x = cp.Variable(2)
+        prob = cp.Problem(cp.Maximize(cp.norm(x)), [x >= 0, x <= 1])
+
+        result = dccp(prob, k_ccp=3, parallel=True, seed=42)
+
+        # For Maximize(norm(x)) with x in [0,1]^2, optimal is x=[1,1], norm=sqrt(2)
+        expected = np.sqrt(2)
+        assert result > 0, "Maximization result should be positive"
+        assert np.isclose(result, expected, atol=0.1), f"Expected ~1.414, got {result}"
+
+
+class TestSolveMultiInit:
+    """Test the solve_multi_init method and helpers."""
+
+    def test_solve_one_init(self) -> None:
+        """Test _solve_one_init helper method."""
+        x = cp.Variable(2)
+        prob = cp.Problem(cp.Maximize(cp.norm(x)), [x >= 0, x <= 1])
+
+        solver = DCCP(prob, settings=DCCPSettings(verify_dccp=False, seed=42))
+        cost, var_values = solver._solve_one_init()
+
+        assert cost is not None
+        assert var_values is not None
+        assert len(var_values) == 1  # One variable
+        assert x.id in var_values  # Keyed by variable id
+        assert solver.prob_in.status == cp.OPTIMAL
+
+    def test_solve_multi_sequential(self) -> None:
+        """Test _solve_multi_sequential helper method."""
+        x = cp.Variable(2)
+        prob = cp.Problem(cp.Maximize(cp.norm(x)), [x >= 0, x <= 1])
+
+        solver = DCCP(prob, settings=DCCPSettings(verify_dccp=False, seed=42))
+        best_cost, best_var_values, best_status = solver._solve_multi_sequential(3)
+
+        assert best_cost != np.inf
+        assert best_var_values is not None
+        assert best_status == cp.OPTIMAL
+
+    def test_solve_multi_parallel(self) -> None:
+        """Test _solve_multi_parallel helper method."""
+        x = cp.Variable(2)
+        prob = cp.Problem(cp.Maximize(cp.norm(x)), [x >= 0, x <= 1])
+
+        solver = DCCP(prob, settings=DCCPSettings(verify_dccp=False, seed=42))
+        best_cost, best_var_values, best_status = solver._solve_multi_parallel(
+            3, max_workers=2, mp_context=None
+        )
+
+        assert best_cost != np.inf
+        assert best_var_values is not None
+        assert best_status == cp.OPTIMAL
+
+    def test_solve_multi_init_with_num_inits_one(self) -> None:
+        """Test solve_multi_init returns early when num_inits <= 1."""
+        x = cp.Variable(2)
+        prob = cp.Problem(cp.Maximize(cp.norm(x)), [x >= 0, x <= 1])
+
+        solver = DCCP(prob, settings=DCCPSettings(verify_dccp=False, seed=42))
+        result = solver.solve_multi_init(1)
+
+        assert result is not None
+        assert prob.status == cp.OPTIMAL
