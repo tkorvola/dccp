@@ -262,9 +262,7 @@ class TestDccpFunction:
         result_seq = dccp(
             prob_seq, k_ccp=2, parallel=False, verify_dccp=False, seed=123
         )
-        result_par = dccp(
-            prob_par, k_ccp=2, parallel=True, verify_dccp=False, seed=123
-        )
+        result_par = dccp(prob_par, k_ccp=2, parallel=True, verify_dccp=False, seed=123)
 
         # Both should find optimal solutions (values may differ due to randomness)
         assert result_seq is not None
